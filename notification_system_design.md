@@ -1,18 +1,15 @@
 # Stage 1
 
-## Campus Notification Platform - REST API Design
+## Notification System API Design
 
-
-## Headers
+every request needs these headers
 
 ```
 Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
----
-
-## Notification Structure
+a notification object looks like this
 
 ```json
 {
@@ -25,14 +22,22 @@ Content-Type: application/json
 }
 ```
 
+type can be placement, event or result
+
 ---
 
-## Endpoints
+## API Endpoints
 
-### GET /api/notifications
-Returns all notifications. Supports optional `?type=placement|event|result` filter.
+**GET /api/notifications**
 
-Response:
+get all notifications, can also filter by type using query param
+
+```
+GET /api/notifications
+GET /api/notifications?type=placement
+```
+
+response:
 ```json
 {
   "total": 3,
@@ -43,10 +48,11 @@ Response:
 
 ---
 
-### GET /api/notifications/\<id\>
-Returns a single notification by ID.
+**GET /api/notifications/\<id\>**
 
-Response 200:
+get one notification by its id
+
+200 response:
 ```json
 {
   "id": "...",
@@ -58,17 +64,18 @@ Response 200:
 }
 ```
 
-Response 404:
+if id doesnt exist:
 ```json
 { "error": "Notification not found" }
 ```
 
 ---
 
-### POST /api/notifications/create
-Creates a new notification.
+**POST /api/notifications/create**
 
-Request:
+create a new notification
+
+request body:
 ```json
 {
   "type": "result",
@@ -77,7 +84,7 @@ Request:
 }
 ```
 
-Response 201:
+response (201):
 ```json
 {
   "id": "...",
@@ -91,56 +98,56 @@ Response 201:
 
 ---
 
-### PATCH /api/notifications/\<id\>/read
-Marks a single notification as read.
+**PATCH /api/notifications/\<id\>/read**
 
-Response:
+marks one notification as read
+
 ```json
 { "message": "Notification marked as read", "id": "..." }
 ```
 
 ---
 
-### PATCH /api/notifications/read-all
-Marks all notifications as read.
+**PATCH /api/notifications/read-all**
 
-Response:
+marks everything as read at once
+
 ```json
 { "message": "All notifications marked as read" }
 ```
 
 ---
 
-### DELETE /api/notifications/\<id\>/delete
-Deletes a notification.
+**DELETE /api/notifications/\<id\>/delete**
 
-Response:
+delete a notification
+
 ```json
 { "message": "Notification deleted" }
 ```
 
 ---
 
-### GET /api/notifications/unread-count
-Returns count of unread notifications.
+**GET /api/notifications/unread-count**
 
-Response:
+just returns how many unread notifications there are
+
 ```json
 { "unread_count": 5 }
 ```
 
 ---
 
-## Real-Time Notifications
+## Real Time Notifications
 
-Real-time delivery is handled using **WebSockets** via Django Channels.
+for real time i am using websockets so the frontend doesnt have to keep refreshing to check for new notifications.
 
-When a student logs in, the frontend opens a WebSocket connection to:
+when a student opens the app, it connects to:
 ```
 ws://host/ws/notifications/
 ```
 
-When a new notification is created, the server immediately pushes it to all connected clients:
+whenever a new notification is created on the backend, it gets pushed to the frontend immediately like this:
 
 ```json
 {
@@ -156,33 +163,22 @@ When a new notification is created, the server immediately pushes it to all conn
 }
 ```
 
-Redis is used as the channel layer so messages are broadcast across all server instances.
+django channels handles the websocket part and redis is used so all server instances can share messages.
 
----
-
-## Error Format
-
-All errors follow this structure:
-
+all errors come back as:
 ```json
-{ "error": "description" }
+{ "error": "what went wrong" }
 ```
-
-Status codes: `200`, `201`, `400`, `401`, `404`, `500`
 
 ---
 
 # Stage 2
 
-## Database Choice
+## Database
 
-I am using **SQLite** for this system.
+I used SQLite. its already built into python and django uses it by default so no extra setup is needed. since this is a campus platform and the data is simple (all notifications have the same fields every time), sqlite is more than enough for this.
 
-SQLite is a file-based database that comes built into Python and Django — no installation or configuration needed. For a campus notification platform with a few thousand students, it handles the load perfectly fine. The data structure is simple and fixed, so a lightweight SQL database is the right choice. There is no need for a separate database server, which keeps the setup simple.
-
----
-
-## DB Schema
+## Schema
 
 ```sql
 CREATE TABLE notifications (
@@ -195,7 +191,7 @@ CREATE TABLE notifications (
 );
 ```
 
-Indexes to add:
+also added these indexes so queries don't get slow:
 
 ```sql
 CREATE INDEX idx_notifications_type ON notifications(type);
@@ -203,76 +199,112 @@ CREATE INDEX idx_notifications_is_read ON notifications(is_read);
 CREATE INDEX idx_notifications_created_at ON notifications(created_at DESC);
 ```
 
----
+## Problems that can come up when data grows
 
-## Problems as Data Volume Grows
+first problem is that queries become slow. if there are lakhs of rows, doing SELECT * or filtering by is_read will take time because sqlite has to go through every row.
 
-**1. Slow queries**
-As the table grows to millions of rows, queries like `SELECT * FROM notifications` or `WHERE is_read = FALSE` will become slow because the database has to scan the entire table.
+second is unread notifications keep piling up. students often dont read notifications so the table keeps growing with is_read = 0 rows and any count or filter query on that column gets slower.
 
-**2. Unread notifications piling up**
-If students ignore notifications, the `is_read = FALSE` rows keep growing. Any query filtering on `is_read` slows down.
+third is old data just sitting there. notifications from 6 months ago are useless but still taking up space and slowing things down.
 
-**3. Storage bloat**
-Old notifications from months or years ago take up space and slow down every query even though nobody reads them.
+to fix these - indexes help a lot with the slow query problem. for the old data problem, a scheduled job that deletes notifications older than 90 days would work. and adding pagination so we never fetch all rows at once also helps.
 
-**How to solve these:**
+## Queries
 
-- Add indexes (already shown above) so the DB doesn't do full table scans
-- Add pagination to every list endpoint so we never fetch all rows at once
-- Archive or delete notifications older than 90 days with a scheduled job
-
----
-
-## SQL Queries for Each API
-
-**GET /api/notifications — fetch all**
+get all notifications
 ```sql
 SELECT * FROM notifications
 ORDER BY created_at DESC;
 ```
 
-**GET /api/notifications?type=placement — filter by type**
+filter by type
 ```sql
 SELECT * FROM notifications
 WHERE type = 'placement'
 ORDER BY created_at DESC;
 ```
 
-**GET /api/notifications/\<id\> — fetch one**
+get one by id
 ```sql
 SELECT * FROM notifications
 WHERE id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 ```
 
-**POST /api/notifications/create — insert new**
+insert new notification
 ```sql
 INSERT INTO notifications (id, type, title, message)
 VALUES ('a1b2c3d4-e5f6-7890-abcd-ef1234567890', 'placement', 'Google Drive on Campus', 'Google visiting on 10th May.');
 ```
 
-**PATCH /api/notifications/\<id\>/read — mark one as read**
+mark one as read
 ```sql
 UPDATE notifications
-SET is_read = TRUE
+SET is_read = 1
 WHERE id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 ```
 
-**PATCH /api/notifications/read-all — mark all as read**
+mark all as read
 ```sql
 UPDATE notifications
-SET is_read = TRUE
-WHERE is_read = FALSE;
+SET is_read = 1
+WHERE is_read = 0;
 ```
 
-**DELETE /api/notifications/\<id\>/delete — delete one**
+delete one
 ```sql
 DELETE FROM notifications
 WHERE id = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
 ```
 
-**GET /api/notifications/unread-count — count unread**
+count unread
 ```sql
 SELECT COUNT(*) FROM notifications
-WHERE is_read = FALSE;
+WHERE is_read = 0;
+```
+
+---
+
+# Stage 3
+
+the query in question:
+```sql
+SELECT * FROM notifications
+WHERE studentID = 1042 AND isRead = false
+ORDER BY createdAt DESC;
+```
+
+**is the query accurate?**
+
+the query is logically doing the right thing - fetching unread notifications for a specific student sorted by newest first. but it will be very slow on a table with 5 million rows because there are no indexes on studentID or isRead so the database has to scan every single row to find matches.
+
+**why is it slow?**
+
+with 50,000 students and 5 million notifications, a full table scan on every request is expensive. every time a student opens the app this query runs and reads through millions of rows just to find a few hundred. no indexes means no shortcuts.
+
+**what to change?**
+
+add a composite index on studentID and isRead together since both are used in the WHERE clause:
+
+```sql
+CREATE INDEX idx_student_read ON notifications(studentID, isRead);
+```
+
+also adding createdAt to the index helps since we are sorting by it:
+
+```sql
+CREATE INDEX idx_student_read_date ON notifications(studentID, isRead, createdAt);
+```
+
+with this index the db goes directly to the rows for that student instead of scanning everything. cost goes from O(n) on 5 million rows to roughly O(log n) which is much faster.
+
+**should we add indexes on every column?**
+
+no, that is bad advice. indexes speed up reads but slow down writes. every INSERT or UPDATE has to update all the indexes too. if every column has an index, adding one notification becomes slow because the db has to update 6-7 indexes. also indexes take up extra storage. you should only index columns that are actually used in WHERE or ORDER BY.
+
+**query to find students who got a placement notification in last 7 days**
+
+```sql
+SELECT DISTINCT studentID FROM notifications
+WHERE notificationType = 'Placement'
+AND createdAt >= NOW() - INTERVAL 7 DAY;
 ```
