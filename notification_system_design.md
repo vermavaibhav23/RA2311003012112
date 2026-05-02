@@ -308,3 +308,67 @@ SELECT DISTINCT studentID FROM notifications
 WHERE notificationType = 'Placement'
 AND createdAt >= NOW() - INTERVAL 7 DAY;
 ```
+
+---
+
+# Stage 4
+
+the problem is that every time a student opens the app, a DB query runs. with 50,000 students doing this at the same time the database gets hit thousands of times per minute which is why it is getting overwhelmed.
+
+**solution 1 - caching**
+
+store the result of the notification query in cache (like Redis) for a short time, maybe 30-60 seconds. so instead of hitting the DB every time, most requests just read from cache.
+
+tradeoff: a student might see slightly outdated notifications for up to 60 seconds. also you need to clear the cache when new notifications are added otherwise students wont see them immediately. adds some complexity to the code.
+
+**solution 2 - pagination**
+
+instead of fetching all notifications at once, fetch only 10 or 20 at a time. this reduces how much data the DB reads and returns each request.
+
+tradeoff: frontend has to handle loading more notifications when the user scrolls down. but this is a very common pattern and worth doing regardless of other optimizations.
+
+**solution 3 - only fetch unread count on load**
+
+instead of fetching all notifications on every page load, just fetch the unread count. only fetch the full list when the student actually clicks on the notification bell. most students open the app without checking notifications so this avoids a lot of unnecessary queries.
+
+tradeoff: slight delay when the student opens the notification panel since that triggers a query at that point. but this is better than hammering the DB on every single page load.
+
+the best approach is combining all three - pagination + caching + lazy loading. caching alone can serve stale data, pagination alone still hits the DB, but together they reduce DB load significantly.
+
+---
+
+# Stage 5
+
+**problems with the current implementation**
+
+the main problem is everything is happening one by one inside a loop for 50,000 students. for each student it calls send_email, then saves to DB, then pushes to app. this means the whole thing runs synchronously and will take a very long time. the person who clicked "Notify All" is basically waiting for 50,000 emails to send before anything finishes.
+
+also if send_email fails at student 200, the loop crashes or skips. the remaining 49,800 students get nothing. there is no retry logic and no way to know which students were missed.
+
+**should DB save and email happen together?**
+
+no they should not. email and in-app notification are two different things. if the email API is down, students should still get the in-app notification. tying them together means one failure breaks everything. they should be completely independent of each other.
+
+**how to redesign this**
+
+first save all notifications to DB in one bulk insert instead of 50,000 separate inserts. then push to app for all students. then put all the emails into a queue and process them separately in the background.
+
+if an email fails it can be retried from the queue without affecting anything else.
+
+```
+function notify_all(student_ids, message):
+    bulk_save_to_db(student_ids, message)
+    push_to_app(student_ids, message)
+    for student_id in student_ids:
+        add_to_email_queue(student_id, message)
+
+function process_email_queue():
+    for each job in queue:
+        success = send_email(job.student_id, job.message)
+        if not success:
+            retry(job)
+```
+
+**what to do about the 200 students whose email failed**
+
+since emails go through a queue with retry logic, the failed ones will be retried automatically. we can also log which student_ids failed so if retries also fail, we know exactly who to resend to manually. the in-app notification already went through so at least they got notified inside the app.
