@@ -372,3 +372,23 @@ function process_email_queue():
 **what to do about the 200 students whose email failed**
 
 since emails go through a queue with retry logic, the failed ones will be retried automatically. we can also log which student_ids failed so if retries also fail, we know exactly who to resend to manually. the in-app notification already went through so at least they got notified inside the app.
+
+---
+
+# Stage 6
+
+i fetch notifications from the API, filter only unread ones, then score each notification based on type and how recent it is. top 10 are picked using a heap.
+
+**scoring formula**
+
+placement gets weight 3, result gets 2, event gets 1. recency is calculated as seconds since the notification was created. the final score is:
+
+```
+score = (weight * 86400) - seconds_since_created
+```
+
+multiplying weight by 86400 (seconds in a day) means a placement notification has to be more than 1 day older than a result to lose priority to it. this keeps type as the main factor but recency still matters when types are equal or close.
+
+**how top 10 is maintained as new notifications come in**
+
+i use a min-heap of size 10. when a new notification arrives its score is calculated. if the score is higher than the lowest score already in the heap, it replaces it. this way we never have to re-sort the entire list, we just do one heap operation which is O(log 10) = basically constant time.
